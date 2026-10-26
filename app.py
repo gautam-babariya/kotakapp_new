@@ -507,6 +507,6 @@ if __name__ == "__main__":
     # close_all_positions(client, quantity=hard_quantity, product="MIS")
     
     # start_scheduler_thread()
-    app.run(debug=True, port=6000, use_reloader=False)
+    app.run(debug=True, port=8000, use_reloader=False)
     
         
