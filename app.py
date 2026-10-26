@@ -4,11 +4,12 @@ from getstrick import get_strangle_symbols
 from login import get_authenticated_client
 from config import trades_collection,config_collection
 from placeorder import placeorder
-from datetime import datetime
 import asyncio
 import threading
 import time
-
+import pytz
+import pandas_market_calendars as mcal
+from datetime import datetime, time as dtime
 from websocket import live_feed_data
 
 import asyncio
@@ -18,7 +19,7 @@ import logic
 
 app = Flask(__name__)
 client = get_authenticated_client()
-
+hard_quantity = "65"  # Hardcoded quantity for all orders
 @app.route("/")
 def home():
     return jsonify({"message": "Kotak Neo Algo Trading Flask App is running!"})
@@ -51,7 +52,8 @@ def fetch_symbols_route():
                 "entry_price": None,
                 "exit_price": None,
                 "trade_open": False,
-                "stop_loss": None  # Example: 20% buffer for stop loss
+                "stop_loss": None,  # Example: 20% buffer for stop loss
+                "sl_orderno": None  # To store the stop loss order number if needed
             },
             "pe": {
                 "token": str(pe["Token"]),
@@ -59,7 +61,8 @@ def fetch_symbols_route():
                 "entry_price": None,
                 "exit_price": None,
                 "trade_open": False,
-                "stop_loss": None  # Example: 20% buffer for stop loss
+                "stop_loss": None,  # Example: 20% buffer for stop loss
+                "sl_orderno": None  # To store the stop loss order number if needed
             }
         }
         
@@ -70,7 +73,7 @@ def fetch_symbols_route():
             "message": "Symbols fetched and trade saved successfully",
         }, 200
 
-def execute_order(client, ordertype="MKT", transaction_type="S", quantity="1", product="MIS"):
+def execute_order(client, ordertype="MKT", transaction_type="S", quantity="65", product="MIS"):
     """
     1. Fetches the latest strangle trade document from MongoDB.
     2. Extracts the CE and PE symbols.
@@ -148,7 +151,7 @@ def execute_order(client, ordertype="MKT", transaction_type="S", quantity="1", p
         print(f"❌ Exception in execute_order: {e}")
         return {"status": "error", "message": str(e)}
 
-def place_stop_loss_orders(client, quantity="1", product="MIS"):
+def place_stop_loss_orders(client, quantity="65", product="MIS"):
     """
     1. Fetches the active open trade from MongoDB.
     2. Places a Stop Loss Market (SL-M) Buy order for both CE and PE symbols
@@ -164,7 +167,9 @@ def place_stop_loss_orders(client, quantity="1", product="MIS"):
         if not trade_doc:
             print("❌ No active open trade found in MongoDB to place stop loss.")
             return {"status": "error", "message": "No active trade found"}
-
+        
+        trade_id = trade_doc["_id"]
+        
         legs = [
             ("CE", trade_doc["ce"]),
             ("PE", trade_doc["pe"])
@@ -200,7 +205,24 @@ def place_stop_loss_orders(client, quantity="1", product="MIS"):
             order_number = res.get("nOrdNo")
 
             if status_code == 200:
-                print(f"✅ Stop Loss order placed successfully for {symbol}! Order No: {order_number}")
+                if leg_name == "CE":
+                    update_result = trades_collection.update_one(
+                                {"_id": trade_id},
+                                {
+                                    "$set": {
+                                        "ce.sl_orderno": order_number
+                                    }
+                                }
+                            )
+                elif leg_name == "PE":
+                    update_result = trades_collection.update_one(
+                                {"_id": trade_id},
+                                {
+                                    "$set": {
+                                        "pe.sl_orderno": order_number
+                                    }
+                                }
+                            )    
                 sl_results[leg_name] = {
                     "symbol": symbol,
                     "order_no": order_number,
@@ -225,7 +247,7 @@ def place_stop_loss_orders(client, quantity="1", product="MIS"):
         print(f"❌ Exception in place_stop_loss_orders: {e}")
         return {"status": "error", "message": str(e)}
     
-def close_all_positions(client, product="MIS"):
+def close_all_positions(client,quantity="65", product="MIS"):
     """
     1. Fetches the active open trade document from MongoDB.
     2. Identifies which legs (CE and/or PE) are currently open.
@@ -258,6 +280,10 @@ def close_all_positions(client, product="MIS"):
         ce_symbol = trade_doc["ce"].get("symbol") if ce_is_open else None
         pe_symbol = trade_doc["pe"].get("symbol") if pe_is_open else None
         
+        ceslorder_no = str(trade_doc["ce"].get("sl_orderno"))
+        peslorder_no = str(trade_doc["pe"].get("sl_orderno"))
+        client.cancel_order(order_id = ceslorder_no, isVerify=True)
+        client.cancel_order(order_id = peslorder_no, isVerify=True)
         symbols = []
         if ce_is_open and ce_symbol:
             symbols.append(ce_symbol)
@@ -274,11 +300,11 @@ def close_all_positions(client, product="MIS"):
             symbols=symbols,
             ordertype="MKT",
             transaction_type="B",
-            quantity="1",
+            quantity=quantity,
             product=product
         )
 
-        # 3. Build dynamic update dictionary for MongoDB and result data
+        # 3. Build dyn"amic update dictionary for MongoDB and result data
         update_fields = {"closed_at": datetime.now()}
         response_data = {}
 
@@ -319,7 +345,7 @@ def close_all_positions(client, product="MIS"):
         print(f"❌ Exception in close_all_positions: {e}")
         return {"status": "error", "message": str(e)}    
     
-def start_websocket(client):
+def start_websocket(client, quantity="65"):
 # 1. Initialize client & complete login
     trade_doc = trades_collection.find_one(
     {
@@ -350,7 +376,7 @@ def start_websocket(client):
     print("WebSocket background thread launched.")
     logic_thread = threading.Thread(
         target=logic.monitor_strangle_sl,
-        args=(client, 0.1),  # high-speed 100ms interval
+        args=(client, quantity, 0.1),  # high-speed 100ms interval
         daemon=False
     )
     logic_thread.start()
@@ -360,17 +386,127 @@ def stop_websocket():
     print("WebSocket stop signal sent.")
     
         
+# Define IST timezone
+IST = pytz.timezone('Asia/Kolkata')
+
+def is_market_open_today():
+    """
+    Checks if NSE is open today (excluding weekends and official trading holidays).
+    """
+    try:
+        today = datetime.now(IST).date()
+        
+        # Correct function name is get_calendar instead of get_market_calendar
+        nse = mcal.get_calendar('NSE')
+        
+        schedule = nse.schedule(start_date=today, end_date=today)
+        return not schedule.empty
+    except Exception as e:
+        print(f"⚠️ Error checking market calendar: {e}. Defaulting to True.")
+        return True # Fallback if calendar lookup fails
+    
+def run_scheduled_jobs():
+    """
+    Background worker that checks current IST time and triggers:
+    - 9:00 AM: Auto login
+    - 9:20 AM: Fetch symbols
+    - 9:21 AM: Execute orders, place SL, start websocket
+    - 3:05 PM: Close positions and stop websocket
+    """
+    global client
+    
+    last_run_date = None
+    ran_900 = False
+    ran_920 = False
+    ran_921 = False
+    ran_1505 = False
+
+    print("🕒 IST Background Scheduler started successfully.")
+
+    while True:
+        try:
+            now_ist = datetime.now(IST)
+            current_date = now_ist.date()
+            current_time = now_ist.time()
+
+            # Reset flags on a new day
+            if last_run_date != current_date:
+                last_run_date = current_date
+                ran_900 = False
+                ran_920 = False
+                ran_921 = False
+                ran_1505 = False
+
+            # Skip execution if today is a weekend or market holiday
+            if not is_market_open_today():
+                time.sleep(3600)  # Sleep for an hour on holidays/weekends
+                continue
+
+            # 1. Auto Login at 9:00 AM
+            if not ran_900 and current_time >= dtime(9, 0) and current_time < dtime(9, 1):
+                print("🔐 [Scheduler] Running 9:00 AM Auto Login...")
+                try:
+                    client = get_authenticated_client()
+                    print("✅ [Scheduler] Re-authenticated client successfully.")
+                except Exception as e:
+                    print(f"❌ [Scheduler] Auto login failed: {e}")
+                ran_900 = True
+
+            # 2. Fetch Symbols at 9:20 AM
+            elif not ran_920 and current_time >= dtime(9, 20) and current_time < dtime(9, 21):
+                print("📊 [Scheduler] Running 9:20 AM Fetch Symbols...")
+                try:
+                    fetch_symbols_route()
+                    print("✅ [Scheduler] Symbols fetched and saved.")
+                except Exception as e:
+                    print(f"❌ [Scheduler] Fetch symbols failed: {e}")
+                ran_920 = True
+
+            # 3. Execute Orders & Start Websocket at 9:21 AM
+            elif not ran_921 and current_time >= dtime(9, 21) and current_time < dtime(9, 22):
+                print("🚀 [Scheduler] Running 9:21 AM Order Execution & Websocket Start...")
+                try:
+                    exec_res = execute_order(client, ordertype="MKT", transaction_type="S", quantity=hard_quantity, product="MIS")
+                    if exec_res.get("status") == "success":
+                        place_stop_loss_orders(client, quantity=hard_quantity, product="MIS")
+                        start_websocket(client, quantity=hard_quantity)
+                        print("✅ [Scheduler] Orders executed, SL placed, and websocket started.")
+                    else:
+                        print("⚠️ [Scheduler] Order execution skipped or failed.")
+                except Exception as e:
+                    print(f"❌ [Scheduler] 9:21 AM execution routine failed: {e}")
+                ran_921 = True
+
+            # 4. Close Positions & Stop Websocket at 3:05 PM (15:05)
+            elif not ran_1505 and current_time >= dtime(15, 5) and current_time < dtime(15, 6):
+                print("🛑 [Scheduler] Running 3:05 PM Close Positions & Stop Websocket...")
+                try:
+                    close_all_positions(client, quantity=hard_quantity, product="MIS")
+                    stop_websocket()
+                    print("✅ [Scheduler] Positions closed and websocket stopped.")
+                except Exception as e:
+                    print(f"❌ [Scheduler] 3:05 PM closing routine failed: {e}")
+                ran_1505 = True
+
+        except Exception as e:
+            print(f"❌ Error in scheduler loop: {e}")
+
+        # Check time every 10 seconds
+        time.sleep(10)
+
+def start_scheduler_thread():
+    scheduler_thread = threading.Thread(target=run_scheduled_jobs, daemon=True)
+    scheduler_thread.start()
+    
+            
 if __name__ == "__main__":
 #    fetch_symbols_route()
-#    execute_order(client, ordertype="MKT", transaction_type="S", quantity="1", product="MIS")
-#    start_websocket(client)
-#    place_stop_loss_orders(client, quantity="65", product="MIS")
-    close_all_positions(client, product="MIS")
+#    execute_order(client, ordertype="MKT", transaction_type="S", quantity=hard_quantity, product="MIS")
+#    place_stop_loss_orders(client, quantity=hard_quantity, product="MIS")
+    # start_websocket(client, quantity=hard_quantity)
+    # close_all_positions(client, quantity=hard_quantity, product="MIS")
+    
+    # start_scheduler_thread()
     app.run(debug=True, port=6000, use_reloader=False)
     
-
-      
-# quantity updation
-# stop loss order close every time when position close
-# scheduled job 
-# stoploss updation      
+        

@@ -1,13 +1,12 @@
 import time
 from neo_api_client import NeoAPI
 
-def placeorder(client,symbols,ordertype,transaction_type, quantity="1", product="MIS"):
+def placeorder(client,symbols,ordertype,transaction_type, quantity="65", product="MIS"):
     """
     Sells two option symbols, retrieves their executed entry prices, 
     and places a corresponding Stop Loss order at entry_price + 10.
     """
     results = {}
-    quantity= 65
     for symbol in symbols:
         try:
             # 1. Place Sell Order (Market Order for quick execution)

@@ -5,7 +5,7 @@ from config import trades_collection,config_collection
 from placeorder import placeorder
 
 
-def monitor_strangle_sl(client, check_interval=0.1):
+def monitor_strangle_sl(client,quantity="65", check_interval=0.1):
     """
     Optimized monitoring worker that:
     1. Fetches the active trade document ONCE outside the loop for fast execution.
@@ -48,16 +48,23 @@ def monitor_strangle_sl(client, check_interval=0.1):
         ce_symbol = [str(ce_data.get("symbol"))]
         pe_symbol = [str(pe_data.get("symbol"))]
         
-        ce_sl = float(ce_data.get("stop_loss", 0.0))
-        pe_sl = float(pe_data.get("stop_loss", 0.0))
-        
         ce_open = ce_data.get("trade_open", True)
         pe_open = pe_data.get("trade_open", True)
         
-        print(f"Tracking CE Token: {ce_symbol} (SL: {ce_sl}) | PE Token: {pe_symbol} (SL: {pe_sl})")
+        ceslorder_no = str(ce_data.get("sl_orderno"))
+        peslorder_no = str(pe_data.get("sl_orderno"))
 
         while ce_open or pe_open:
             # 2. Get latest live LTP ticks from shared in-memory dictionary (ultra-fast)
+            
+            ce_sl = float(ce_data.get("entry_price", 0.0))+10.0  # Assuming stop loss is entry_price + 10   
+            pe_sl = float(pe_data.get("entry_price", 0.0))+10.0  # Assuming stop loss is entry_price + 10
+            
+            if ce_open!=True:
+                pe_sl = float(pe_data.get("entry_price", 0.0)) 
+            if pe_open!=True:
+                ce_sl = float(ce_data.get("entry_price", 0.0)) 
+            
             ce_tick = websocket.live_feed_data.get(ce_token) if ce_open else None
             pe_tick = websocket.live_feed_data.get(pe_token) if pe_open else None
             
@@ -70,11 +77,10 @@ def monitor_strangle_sl(client, check_interval=0.1):
             pe_ltp = float(pe_tick.get("ltp", 0.0)) if pe_tick else 0.0
             
             # 3. Check CE Stop-Loss (Short position: triggered if LTP >= stop_loss)
-#            print(f"[Monitoring] CE LTP: {ce_ltp} | CE SL: {ce_sl} | PE LTP: {pe_ltp} | PE SL: {pe_sl}")
             if ce_open and ce_ltp >= ce_sl:
                 print(f"⚠️ CE STOP LOSS HIT! Token {ce_token} | LTP: {ce_ltp} >= SL: {ce_sl}")
                 try:
-                    order_results = placeorder(client, ce_symbol, ordertype="MKT", transaction_type="B", quantity="1", product="MIS")
+                    order_results = placeorder(client, ce_symbol, ordertype="MKT", transaction_type="B", quantity=quantity, product="MIS")
                     
                     # Update MongoDB for CE leg only
                     trades_collection.update_one(
@@ -87,6 +93,7 @@ def monitor_strangle_sl(client, check_interval=0.1):
                         }
                     )
                     ce_open = False
+                    client.cancel_order(order_id = ceslorder_no, isVerify=True)
                     print("✅ CE leg closed and updated in MongoDB.")
                 except Exception as e:
                     print(f"❌ Error squaring off CE leg: {e}")
@@ -95,7 +102,7 @@ def monitor_strangle_sl(client, check_interval=0.1):
             if pe_open and pe_ltp >= pe_sl:
                 print(f"⚠️ PE STOP LOSS HIT! Token {pe_token} | LTP: {pe_ltp} >= SL: {pe_sl}")
                 try:
-                    order_results = placeorder(client, pe_symbol, ordertype="MKT", transaction_type="B", quantity="1", product="MIS")
+                    order_results = placeorder(client, pe_symbol, ordertype="MKT", transaction_type="B", quantity=quantity, product="MIS")
                     
                     # Update MongoDB for PE leg only
                     trades_collection.update_one(
@@ -108,6 +115,7 @@ def monitor_strangle_sl(client, check_interval=0.1):
                         }
                     )
                     pe_open = False
+                    client.cancel_order(order_id = peslorder_no, isVerify=True)
                     print("✅ PE leg closed and updated in MongoDB.")
                 except Exception as e:
                     print(f"❌ Error squaring off PE leg: {e}")
