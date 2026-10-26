@@ -7,7 +7,7 @@ def placeorder(client,symbols,ordertype,transaction_type, quantity="1", product=
     and places a corresponding Stop Loss order at entry_price + 10.
     """
     results = {}
-
+    quantity= 65
     for symbol in symbols:
         try:
             # 1. Place Sell Order (Market Order for quick execution)

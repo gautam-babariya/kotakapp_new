@@ -186,8 +186,8 @@ def place_stop_loss_orders(client, quantity="1", product="MIS"):
             res = client.place_order(
                 exchange_segment="nse_fo",            # Options trade on nse_fo
                 product=product,                      # MIS or NRML
-                price="0",                            # 0 for SL-M trigger orders
-                order_type="SL-M",                    # Stop Loss Market order type
+                price=str(stop_loss_price),                            # 0 for SL-M trigger orders
+                order_type="SL",                    # Stop Loss Market order type
                 quantity=str(quantity),               # Lot size / Quantity as string
                 validity="DAY",
                 trading_symbol=symbol,
@@ -228,14 +228,20 @@ def place_stop_loss_orders(client, quantity="1", product="MIS"):
 def close_all_positions(client, product="MIS"):
     """
     1. Fetches the active open trade document from MongoDB.
-    2. Extracts CE and PE symbols.
-    3. Calls placeorder() with transaction_type="B" and order_type="MKT" to square off positions.
-    4. Updates MongoDB to set trade_open = False and record exit prices and status.
+    2. Identifies which legs (CE and/or PE) are currently open.
+    3. Places Market Buy orders only for the active open legs to square them off.
+    4. Dynamically updates MongoDB to set trade_open = False and record exit prices only for closed legs.
     """
     try:
-        # 1. Fetch the active open trade from MongoDB where trade_open is True
+        # 1. Fetch the active open trade from MongoDB where at least one leg is open
         trade_doc = trades_collection.find_one(
-            {"strategy": "strangle", "ce.trade_open": True, "pe.trade_open": True},
+            {
+                "strategy": "strangle", 
+                "$or": [
+                    {"ce.trade_open": True}, 
+                    {"pe.trade_open": True}
+                ]
+            },
             sort=[("created_at", -1)]
         )
         
@@ -244,14 +250,25 @@ def close_all_positions(client, product="MIS"):
             return {"status": "error", "message": "No active trade found"}
 
         trade_id = trade_doc["_id"]
-        ce_symbol = trade_doc["ce"]["symbol"]
-        pe_symbol = trade_doc["pe"]["symbol"]
-        symbols = [ce_symbol, pe_symbol]
+        
+        # Track which legs are open
+        ce_is_open = trade_doc.get("ce", {}).get("trade_open", False)
+        pe_is_open = trade_doc.get("pe", {}).get("trade_open", False)
+        
+        ce_symbol = trade_doc["ce"].get("symbol") if ce_is_open else None
+        pe_symbol = trade_doc["pe"].get("symbol") if pe_is_open else None
+        
+        symbols = []
+        if ce_is_open and ce_symbol:
+            symbols.append(ce_symbol)
+        if pe_is_open and pe_symbol:
+            symbols.append(pe_symbol)
 
-        print(f"🔄 Closing positions for CE: {ce_symbol} and PE: {pe_symbol}")
+        if not symbols:
+            print("❌ No open symbols found to square off.")
+            return {"status": "error", "message": "No open symbols found"}
 
-        # 2. Place Market Buy orders to square off the short positions
-        # Note: ordertype="MKT" is passed, along with transaction_type="B"
+        # 2. Place Market Buy orders only for open legs
         order_results = placeorder(
             client=client,
             symbols=symbols,
@@ -261,39 +278,38 @@ def close_all_positions(client, product="MIS"):
             product=product
         )
 
-        # 3. Extract execution results for CE and PE exit prices
-        ce_result = order_results.get(ce_symbol, {})
-        pe_result = order_results.get(pe_symbol, {})
+        # 3. Build dynamic update dictionary for MongoDB and result data
+        update_fields = {"closed_at": datetime.now()}
+        response_data = {}
 
-        ce_exit = ce_result.get("entry_price") # This acts as the exit execution price
-        pe_exit = pe_result.get("entry_price")
+        if ce_is_open and ce_symbol:
+            ce_result = order_results.get(ce_symbol, {})
+            ce_exit = ce_result.get("entry_price")  # Execution price for the buy order
+            
+            update_fields["ce.trade_open"] = False
+            update_fields["ce.exit_price"] = ce_exit
+            response_data["ce"] = {"symbol": ce_symbol, "exit_price": ce_exit}
 
-        if not ce_exit or not pe_exit:
-            print("⚠️ Warning: Could not retrieve exact exit execution prices for one or more legs.")
+        if pe_is_open and pe_symbol:
+            pe_result = order_results.get(pe_symbol, {})
+            pe_exit = pe_result.get("entry_price")  # Execution price for the buy order
+            
+            update_fields["pe.trade_open"] = False
+            update_fields["pe.exit_price"] = pe_exit
+            response_data["pe"] = {"symbol": pe_symbol, "exit_price": pe_exit}
 
-        # 4. Update MongoDB to mark the trade as closed
+        # 4. Update MongoDB selectively for only the active legs that were squared off
         update_result = trades_collection.update_one(
             {"_id": trade_id},
-            {
-                "$set": {
-                    "ce.exit_price": ce_exit,
-                    "ce.trade_open": False,
-                    "pe.exit_price": pe_exit,
-                    "pe.trade_open": False,
-                    "closed_at": datetime.now()
-                }
-            }
+            {"$set": update_fields}
         )
 
         if update_result.modified_count > 0:
-            print("✅ Positions successfully squared off and MongoDB updated!")
+            print("✅ Active positions successfully squared off and MongoDB updated selectively!")
             return {
                 "status": "success",
-                "message": "All positions closed and database updated successfully",
-                "data": {
-                    "ce": {"symbol": ce_symbol, "exit_price": ce_exit},
-                    "pe": {"symbol": pe_symbol, "exit_price": pe_exit}
-                }
+                "message": "Open positions closed and database updated successfully",
+                "data": response_data
             }
         else:
             print("⚠️ Failed to update MongoDB trade document.")
@@ -306,9 +322,15 @@ def close_all_positions(client, product="MIS"):
 def start_websocket(client):
 # 1. Initialize client & complete login
     trade_doc = trades_collection.find_one(
-                {"strategy": "strangle", "ce.trade_open": True, "pe.trade_open": True},
-                sort=[("created_at", -1)]
-            )
+    {
+        "strategy": "strangle", 
+        "$or": [
+            {"ce.trade_open": True}, 
+            {"pe.trade_open": True}
+        ]
+    },
+    sort=[("created_at", -1)]
+)
             
     if not trade_doc:
         print("❌ No active open trade found in MongoDB to close.")
@@ -339,5 +361,16 @@ def stop_websocket():
     
         
 if __name__ == "__main__":
-    app.run(debug=True, port=5000, use_reloader=False)
+#    fetch_symbols_route()
+#    execute_order(client, ordertype="MKT", transaction_type="S", quantity="1", product="MIS")
+#    start_websocket(client)
+#    place_stop_loss_orders(client, quantity="65", product="MIS")
+    close_all_positions(client, product="MIS")
+    app.run(debug=True, port=6000, use_reloader=False)
     
+
+      
+# quantity updation
+# stop loss order close every time when position close
+# scheduled job 
+# stoploss updation      

@@ -18,9 +18,19 @@ def monitor_strangle_sl(client, check_interval=0.1):
     try:
         # 1. Fetch active trade ONCE before entering the high-speed loop
         trade_doc = trades_collection.find_one(
-            {"strategy": "strangle", "$or": [{"ce.trade_open": True}, {"pe.trade_open": True}]},
-            sort=[("created_at", -1)]
-        )
+        {
+        "strategy": "strangle", 
+        "$or": [
+            {"ce.trade_open": True}, 
+            {"pe.trade_open": True}
+        ]
+    },
+    sort=[("created_at", -1)]
+)
+#        print(trade_doc)
+        # Print the exact number of open trades matching your criteria
+#        print("Open PE count:", trades_collection.count_documents({"pe.trade_open": True}))
+#        print("Latest doc:", trades_collection.find_one(sort=[("created_at", -1)]))
         
         if not trade_doc:
             print("🛑 No active open strangle trade found in MongoDB.")
@@ -35,8 +45,8 @@ def monitor_strangle_sl(client, check_interval=0.1):
         ce_token = str(ce_data.get("token"))
         pe_token = str(pe_data.get("token"))
         
-        ce_symbol = ce_data.get("symbol")
-        pe_symbol = pe_data.get("symbol")
+        ce_symbol = [str(ce_data.get("symbol"))]
+        pe_symbol = [str(pe_data.get("symbol"))]
         
         ce_sl = float(ce_data.get("stop_loss", 0.0))
         pe_sl = float(pe_data.get("stop_loss", 0.0))
@@ -44,7 +54,7 @@ def monitor_strangle_sl(client, check_interval=0.1):
         ce_open = ce_data.get("trade_open", True)
         pe_open = pe_data.get("trade_open", True)
         
-        print(f"Tracking CE Token: {ce_token} (SL: {ce_sl}) | PE Token: {pe_token} (SL: {pe_sl})")
+        print(f"Tracking CE Token: {ce_symbol} (SL: {ce_sl}) | PE Token: {pe_symbol} (SL: {pe_sl})")
 
         while ce_open or pe_open:
             # 2. Get latest live LTP ticks from shared in-memory dictionary (ultra-fast)
@@ -60,6 +70,7 @@ def monitor_strangle_sl(client, check_interval=0.1):
             pe_ltp = float(pe_tick.get("ltp", 0.0)) if pe_tick else 0.0
             
             # 3. Check CE Stop-Loss (Short position: triggered if LTP >= stop_loss)
+#            print(f"[Monitoring] CE LTP: {ce_ltp} | CE SL: {ce_sl} | PE LTP: {pe_ltp} | PE SL: {pe_sl}")
             if ce_open and ce_ltp >= ce_sl:
                 print(f"⚠️ CE STOP LOSS HIT! Token {ce_token} | LTP: {ce_ltp} >= SL: {ce_sl}")
                 try:
