@@ -35,7 +35,6 @@ def get_authenticated_client():
         validate_response = client.totp_validate(
             mpin=os.getenv("KOTAK_MPIN")
         )
-
         print("Successfully authenticated with Kotak Neo API.")
         return client
 

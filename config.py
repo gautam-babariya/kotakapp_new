@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 load_dotenv()
 
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
-DB_NAME = os.getenv("MONGODB_DB_NAME", "nifty_options_db")
+DB_NAME = os.getenv("MONGODB_DB_NAME", "kotak_options_algo")
 
 try:
     client = MongoClient(MONGO_URI)
@@ -26,9 +26,9 @@ def get_config():
     default_config = {
         "entry_time": "09:20:50",
         "exit_time": "15:05:00",
-        "lot_size": 25,
+        "lot_size": 1,
         "premium_filter": 25.0,
-        "sl_points": 10.0
+        "sl_points": 15.0
     }
     if config_collection is None:
         return default_config

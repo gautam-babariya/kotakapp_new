@@ -1,106 +1,54 @@
-from datetime import datetime
-from login import get_authenticated_client
-from config import get_config, log_trade
+import time
+from neo_api_client import NeoAPI
 
-def place_strangle_orders(ce_symbol, ce_ltp, pe_symbol, pe_ltp, expiry):
+def placeorder(client,symbols,ordertype,transaction_type, quantity="1", product="MIS"):
     """
-    Takes the provided CE and PE symbols and LTPs from app.py,
-    places MARKET SELL orders, places SL-M orders (Entry + 10 Rs),
-    and logs the trade details into MongoDB.
+    Sells two option symbols, retrieves their executed entry prices, 
+    and places a corresponding Stop Loss order at entry_price + 10.
     """
-    try:
-        client = get_authenticated_client()
-        if not client:
-            print("[Strategy] Authentication failed.")
-            return {"status": "error", "message": "Authentication failed"}
+    results = {}
 
-        config = get_config()
-        lot_size = str(config.get("lot_size", 1))
-        sl_points = float(config.get("sl_points", 10.0))
+    for symbol in symbols:
+        try:
+            # 1. Place Sell Order (Market Order for quick execution)
+            res = client.place_order(
+                exchange_segment="nse_fo",      # Options trade on nse_fo
+                product=product,                # MIS or NRML
+                price="0",                      # 0 for Market orders
+                order_type=ordertype,               # Market Type
+                quantity=str(quantity),         # Lot size / Quantity as string
+                validity="DAY",
+                trading_symbol=symbol,
+                transaction_type=transaction_type,
+                amo="NO"
+            )
+            
+            # print(f"Sell order response for {symbol}: {res}")
+            status_code = res.get("stCode")
+            order_number = res.get("nOrdNo")
 
-        print(f"\n[Strategy] Placing orders for CE: {ce_symbol} ({ce_ltp}) & PE: {pe_symbol} ({pe_ltp})")
+            if status_code!=200:
+                print(f"❌ Failed to place order for {symbol}. Response: {res}")
+                continue
 
-        # 1. Place Market Sell Order for CE
-        print("[Strategy] Placing MARKET SELL order for CE leg...")
-        ce_order = client.place_order(
-            exchange_segment="nse_fo",
-            product="MIS",
-            price="0",
-            order_type="MKT",
-            quantity=lot_size,
-            validity="DAY",
-            trading_symbol=ce_symbol,
-            transaction_type="S"
-        )
+            # 3. Fetch order history to get the exact executed average price (avgPrc)
+            history_response = client.order_history(order_id=order_number)
+            orders_list = history_response.get("data", {}).get("data", [])
+            
+            entry_price = None
+            for ord_detail in orders_list:
+                # Check if the order is completed/executed
+                if ord_detail.get("ordSt", "").lower() in ["complete", "traded"]:
+                    entry_price = float(ord_detail.get("avgPrc", 0))
+                    print(f"✅ Order Complete for {symbol}! Executed Entry Price: {entry_price}")
+                    break
+            
+            results[symbol] = {
+                "entry_price": entry_price,
+                "status": status_code,
+            }
 
-        # 2. Place Market Sell Order for PE
-        print("[Strategy] Placing MARKET SELL order for PE leg...")
-        pe_order = client.place_order(
-            exchange_segment="nse_fo",
-            product="MIS",
-            price="0",
-            order_type="MKT",
-            quantity=lot_size,
-            validity="DAY",
-            trading_symbol=pe_symbol,
-            transaction_type="S"
-        )
+        except Exception as e:
+            print(f"❌ Exception occurred while processing {symbol}: {e}")
 
-        # Calculate Stoploss Trigger Price (Entry + 10 Rs)
-        ce_sl_trigger = round(float(ce_ltp) + sl_points, 2)
-        pe_sl_trigger = round(float(pe_ltp) + sl_points, 2)
-
-        # 3. Place Broker SL-M Order for CE
-        print(f"[Strategy] Placing SL-M order for CE leg at trigger price: {ce_sl_trigger}...")
-        ce_sl_order = client.place_order(
-            exchange_segment="nse_fo",
-            product="MIS",
-            price="0",
-            order_type="SL-M",
-            quantity=lot_size,
-            validity="DAY",
-            trading_symbol=ce_symbol,
-            transaction_type="B",
-            trigger_price=str(ce_sl_trigger)
-        )
-
-        # 4. Place Broker SL-M Order for PE
-        print(f"[Strategy] Placing SL-M order for PE leg at trigger price: {pe_sl_trigger}...")
-        pe_sl_order = client.place_order(
-            exchange_segment="nse_fo",
-            product="MIS",
-            price="0",
-            order_type="SL-M",
-            quantity=lot_size,
-            validity="DAY",
-            trading_symbol=pe_symbol,
-            transaction_type="B",
-            trigger_price=str(pe_sl_trigger)
-        )
-
-        # Format data structure expected by database.py `log_trade`
-        ce_data = {"Symbol": ce_symbol, "Token": None, "LTP": float(ce_ltp)}
-        pe_data = {"Symbol": pe_symbol, "Token": None, "LTP": float(pe_ltp)}
-
-        # 5. Log Trade in MongoDB
-        trade_id = log_trade(
-            ce_data=ce_data,
-            pe_data=pe_data,
-            lot_size=int(lot_size),
-            expiry=expiry
-        )
-
-        print(f"[Strategy] Orders placed successfully and logged to MongoDB with ID: {trade_id}")
-
-        return {
-            "status": "success",
-            "trade_id": str(trade_id),
-            "ce_order": ce_order,
-            "pe_order": pe_order,
-            "ce_sl_order": ce_sl_order,
-            "pe_sl_order": pe_sl_order
-        }
-
-    except Exception as e:
-        print(f"[Strategy Exception] {e}")
-        return {"status": "error", "message": str(e)}
+    return results
