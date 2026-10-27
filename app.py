@@ -1,4 +1,4 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify,render_template
 from neo_api_client import NeoAPI
 from getstrick import get_strangle_symbols
 from login import get_authenticated_client
@@ -20,10 +20,36 @@ import logic
 app = Flask(__name__)
 client = get_authenticated_client()
 hard_quantity = "65"  # Hardcoded quantity for all orders
+# Global flag to track if positions were already closed manually
+MANUAL_CLOSE_DONE = False
+# Create a global or application-scoped stop event
+stop_monitoring_event = threading.Event()
+
 @app.route("/")
 def home():
-    return jsonify({"message": "Kotak Neo Algo Trading Flask App is running!"})
+    return render_template("index.html")
 
+@app.route('/api/manual-close', methods=['POST'])
+def api_manual_close():
+    """
+    API endpoint triggered by the frontend 'Manual Close' button.
+    Calls your manual_close_trade function and returns JSON status.
+    """
+    global client, hard_quantity
+    
+    try:
+        # Call the manual close method we created earlier
+        result = manual_close_trade()
+        
+        if result.get("status") == "success":
+            return jsonify({"status": "success", "message": "All positions closed and services stopped successfully."}), 200
+        else:
+            return jsonify({"status": "error", "message": result.get("message", "Unknown error occurred.")}), 400
+            
+    except Exception as e:
+        print(f"❌ [API] Error handling manual close request: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+    
 # @app.route("/login", methods=["GET"])
 def login():
     client = get_authenticated_client()
@@ -374,9 +400,12 @@ def start_websocket(client, quantity="65"):
     )
     ws_thread.start()
     print("WebSocket background thread launched.")
+    # Clear any prior states if restarting
+    stop_monitoring_event.clear()
+
     logic_thread = threading.Thread(
         target=logic.monitor_strangle_sl,
-        args=(client, quantity, 0.1),  # high-speed 100ms interval
+        args=(client, quantity, 0.1, stop_monitoring_event),  # 👈 Pass event here
         daemon=False
     )
     logic_thread.start()
@@ -385,7 +414,10 @@ def stop_websocket():
     websocket.stop_websocket()
     print("WebSocket stop signal sent.")
     
-        
+def stop_logic_monitoring():
+    stop_monitoring_event.set()
+    print("Logic monitoring stop signal sent.")
+    
 # Define IST timezone
 IST = pytz.timezone('Asia/Kolkata')
 
@@ -409,15 +441,13 @@ def run_scheduled_jobs():
     """
     Background worker that checks current IST time and triggers:
     - 9:00 AM: Auto login
-    - 9:20 AM: Fetch symbols
-    - 9:21 AM: Execute orders, place SL, start websocket
-    - 3:05 PM: Close positions and stop websocket
+    - 9:20:50 AM: Execute orders, place SL, start websocket
+    - 3:05 PM: Close positions and stop websocket (unless done manually)
     """
-    global client
+    global client, MANUAL_CLOSE_DONE
     
     last_run_date = None
     ran_900 = False
-    ran_920 = False
     ran_921 = False
     ran_1505 = False
 
@@ -433,9 +463,9 @@ def run_scheduled_jobs():
             if last_run_date != current_date:
                 last_run_date = current_date
                 ran_900 = False
-                ran_920 = False
                 ran_921 = False
                 ran_1505 = False
+                MANUAL_CLOSE_DONE = False  # Reset manual flag for the new trading day
 
             # Skip execution if today is a weekend or market holiday
             if not is_market_open_today():
@@ -443,7 +473,7 @@ def run_scheduled_jobs():
                 continue
 
             # 1. Auto Login at 9:00 AM
-            if not ran_900 and current_time >= dtime(9, 0) and current_time < dtime(9, 1):
+            if not ran_900 and current_time >= dtime(9, 0, 0) and current_time < dtime(9, 1, 0):
                 print("🔐 [Scheduler] Running 9:00 AM Auto Login...")
                 try:
                     client = get_authenticated_client()
@@ -452,20 +482,12 @@ def run_scheduled_jobs():
                     print(f"❌ [Scheduler] Auto login failed: {e}")
                 ran_900 = True
 
-            # 2. Fetch Symbols at 9:20 AM
-            elif not ran_920 and current_time >= dtime(9, 20) and current_time < dtime(9, 21):
-                print("📊 [Scheduler] Running 9:20 AM Fetch Symbols...")
+            # 2. Execute Orders & Start Websocket at 9:20:50 AM
+            elif not ran_921 and current_time >= dtime(9, 20, 50) and current_time < dtime(9, 22, 0):
+                print("🚀 [Scheduler] Running 9:20:50 AM Order Execution & Websocket Start...")
                 try:
                     fetch_symbols_route()
-                    print("✅ [Scheduler] Symbols fetched and saved.")
-                except Exception as e:
-                    print(f"❌ [Scheduler] Fetch symbols failed: {e}")
-                ran_920 = True
-
-            # 3. Execute Orders & Start Websocket at 9:21 AM
-            elif not ran_921 and current_time >= dtime(9, 21) and current_time < dtime(9, 22):
-                print("🚀 [Scheduler] Running 9:21 AM Order Execution & Websocket Start...")
-                try:
+                    time.sleep(1) 
                     exec_res = execute_order(client, ordertype="MKT", transaction_type="S", quantity=hard_quantity, product="MIS")
                     if exec_res.get("status") == "success":
                         place_stop_loss_orders(client, quantity=hard_quantity, product="MIS")
@@ -474,39 +496,59 @@ def run_scheduled_jobs():
                     else:
                         print("⚠️ [Scheduler] Order execution skipped or failed.")
                 except Exception as e:
-                    print(f"❌ [Scheduler] 9:21 AM execution routine failed: {e}")
+                    print(f"❌ [Scheduler] 9:20:50 AM execution routine failed: {e}")
                 ran_921 = True
 
-            # 4. Close Positions & Stop Websocket at 3:05 PM (15:05)
-            elif not ran_1505 and current_time >= dtime(15, 5) and current_time < dtime(15, 6):
+            # 3. Close Positions & Stop Websocket at 3:05 PM (Skipped if MANUAL_CLOSE_DONE is True)
+            elif not ran_1505 and not MANUAL_CLOSE_DONE and current_time >= dtime(15, 5, 0) and current_time < dtime(15, 6, 0):
                 print("🛑 [Scheduler] Running 3:05 PM Close Positions & Stop Websocket...")
                 try:
                     close_all_positions(client, quantity=hard_quantity, product="MIS")
                     stop_websocket()
+                    stop_logic_monitoring()
                     print("✅ [Scheduler] Positions closed and websocket stopped.")
                 except Exception as e:
                     print(f"❌ [Scheduler] 3:05 PM closing routine failed: {e}")
                 ran_1505 = True
 
+            # If manual close already happened, mark ran_1505 as True so it doesn't evaluate this block again
+            elif MANUAL_CLOSE_DONE:
+                ran_1505 = True
+
         except Exception as e:
             print(f"❌ Error in scheduler loop: {e}")
 
-        # Check time every 10 seconds
-        time.sleep(10)
+        # Check time every 1 second
+        time.sleep(1)
 
 def start_scheduler_thread():
     scheduler_thread = threading.Thread(target=run_scheduled_jobs, daemon=True)
     scheduler_thread.start()
+         
+def manual_close_trade():
+    """
+    Manually close all positions, stop the websocket and monitoring thread,
+    and prevent the 3:05 PM scheduler from running again today.
+    """
+    global client, hard_quantity
+    global MANUAL_CLOSE_DONE
+    print("🛑 [Manual Trigger] Forcibly closing all positions and stopping services...")
     
-            
+    try:
+        close_all_positions(client, quantity=hard_quantity,  product="MIS")
+        stop_websocket()
+        stop_logic_monitoring()  # Ensures your stop_event is triggered
+        
+        MANUAL_CLOSE_DONE = True
+        return {"status": "success", "message": "Positions closed manually."}
+    
+    except Exception as e:
+        print(f"❌ [Manual Trigger] Error during manual close: {e}")
+        return {"status": "error", "message": str(e)}
+                
 if __name__ == "__main__":
-#    fetch_symbols_route()
-#    execute_order(client, ordertype="MKT", transaction_type="S", quantity=hard_quantity, product="MIS")
-#    place_stop_loss_orders(client, quantity=hard_quantity, product="MIS")
-    # start_websocket(client, quantity=hard_quantity)
-    # close_all_positions(client, quantity=hard_quantity, product="MIS")
     
-    # start_scheduler_thread()
+    start_scheduler_thread()
     app.run(debug=True, port=8000, use_reloader=False)
     
         
