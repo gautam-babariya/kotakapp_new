@@ -68,7 +68,7 @@ def monitor_strangle_sl(client, quantity="65", check_interval=0.1, stop_event=No
             if ce_open and ce_ltp >= ce_sl:
                 print(f"⚠️ CE STOP LOSS HIT! Token {ce_token} | LTP: {ce_ltp} >= SL: {ce_sl}")
                 try:
-                    order_results = placeorder(client, [str(ce_data.get("symbol"))], ordertype="MKT", transaction_type="B", quantity=quantity, product="MIS")
+                    order_results = placeorder(client, [str(ce_data.get("symbol"))], ordertype="MKT", transaction_type="B", quantity=quantity, product="NRML")
                     trades_collection.update_one(
                         {"_id": trade_id},
                         {"$set": {"ce.trade_open": False, "ce.exit_price": ce_ltp}}
@@ -83,7 +83,7 @@ def monitor_strangle_sl(client, quantity="65", check_interval=0.1, stop_event=No
             if pe_open and pe_ltp >= pe_sl:
                 print(f"⚠️ PE STOP LOSS HIT! Token {pe_token} | LTP: {pe_ltp} >= SL: {pe_sl}")
                 try:
-                    order_results = placeorder(client, [str(pe_data.get("symbol"))], ordertype="MKT", transaction_type="B", quantity=quantity, product="MIS")
+                    order_results = placeorder(client, [str(pe_data.get("symbol"))], ordertype="MKT", transaction_type="B", quantity=quantity, product="NRML")
                     trades_collection.update_one(
                         {"_id": trade_id},
                         {"$set": {"pe.trade_open": False, "pe.exit_price": pe_ltp}}

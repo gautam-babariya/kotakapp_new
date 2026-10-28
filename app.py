@@ -488,9 +488,9 @@ def run_scheduled_jobs():
                 try:
                     fetch_symbols_route()
                     time.sleep(1) 
-                    exec_res = execute_order(client, ordertype="MKT", transaction_type="S", quantity=hard_quantity, product="MIS")
+                    exec_res = execute_order(client, ordertype="MKT", transaction_type="S", quantity=hard_quantity, product="NRML")
                     if exec_res.get("status") == "success":
-                        place_stop_loss_orders(client, quantity=hard_quantity, product="MIS")
+                        place_stop_loss_orders(client, quantity=hard_quantity, product="NRML")
                         start_websocket(client, quantity=hard_quantity)
                         print("✅ [Scheduler] Orders executed, SL placed, and websocket started.")
                     else:
