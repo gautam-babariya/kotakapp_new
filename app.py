@@ -503,7 +503,7 @@ def run_scheduled_jobs():
             elif not ran_1505 and not MANUAL_CLOSE_DONE and current_time >= dtime(15, 5, 0) and current_time < dtime(15, 6, 0):
                 print("🛑 [Scheduler] Running 3:05 PM Close Positions & Stop Websocket...")
                 try:
-                    close_all_positions(client, quantity=hard_quantity, product="MIS")
+                    close_all_positions(client, quantity=hard_quantity, product="NRML")
                     stop_websocket()
                     stop_logic_monitoring()
                     print("✅ [Scheduler] Positions closed and websocket stopped.")
