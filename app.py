@@ -535,7 +535,7 @@ def manual_close_trade():
     print("🛑 [Manual Trigger] Forcibly closing all positions and stopping services...")
     
     try:
-        close_all_positions(client, quantity=hard_quantity,  product="MIS")
+        close_all_positions(client, quantity=hard_quantity,  product="NRML")
         stop_websocket()
         stop_logic_monitoring()  # Ensures your stop_event is triggered
         
