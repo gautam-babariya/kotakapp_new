@@ -483,7 +483,7 @@ def run_scheduled_jobs():
                 ran_900 = True
 
             # 2. Execute Orders & Start Websocket at 9:20:50 AM
-            elif not ran_921 and current_time >= dtime(9, 20, 50) and current_time < dtime(9, 22, 0):
+            elif not ran_921 and current_time >= dtime(9, 20, 41) and current_time < dtime(9, 22, 0):
                 print("🚀 [Scheduler] Running 9:20:50 AM Order Execution & Websocket Start...")
                 try:
                     fetch_symbols_route()
@@ -546,9 +546,49 @@ def manual_close_trade():
         print(f"❌ [Manual Trigger] Error during manual close: {e}")
         return {"status": "error", "message": str(e)}
                 
+def recover_active_trades_on_startup():
+    """
+    Checks MongoDB on server startup. If an open trade exists,
+    it automatically restarts the WebSocket and SL monitoring threads.
+    """
+    global client, hard_quantity
+    print("🔄 [Startup] Checking for active open trades in MongoDB...")
+    
+    try:
+        # Look for a trade where at least one leg is still marked open
+        active_trade = trades_collection.find_one(
+            {
+                "strategy": "strangle", 
+                "$or": [
+                    {"ce.trade_open": True}, 
+                    {"pe.trade_open": True}
+                ]
+            },
+            sort=[("created_at", -1)]
+        )
+        
+        if active_trade:
+            print("🚀 [Startup] Active open trade found! Restoring WebSocket and monitoring...")
+            
+            # Re-authenticate client just in case token expired or needs refresh
+            try:
+                client = get_authenticated_client()
+            except Exception as auth_err:
+                print(f"⚠️ [Startup] Client re-authentication warning: {auth_err}")
+
+            # Start WebSocket and SL monitoring threads using the active trade tokens
+            start_websocket(client, quantity=hard_quantity)
+            print("✅ [Startup] WebSocket and SL monitoring successfully recovered and restarted.")
+        else:
+            print("ℹ️ [Startup] No active open trades found. Server standing by.")
+            
+    except Exception as e:
+        print(f"❌ [Startup] Error during active trade recovery: {e}")                
+                
 if __name__ == "__main__":
     
     start_scheduler_thread()
+    recover_active_trades_on_startup()
     app.run(debug=True, port=8000, use_reloader=False)
     
         
